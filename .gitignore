@@ -2,5 +2,5 @@
 **/.bson
 **/.pyc
 **/__pycache__
-
+*.pt
 env

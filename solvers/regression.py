@@ -52,7 +52,7 @@ class Regression(Solver):
         self.n_features = n_features
 
         p_train = train_data[0]
-        y_train = train_data[-3]
+        y_train = train_data[3]
         for k in p_train.keys():
             self.num_train = len(p_train[k])
 
@@ -170,7 +170,7 @@ class Regression(Solver):
                     # writer.add_scalar('Loss/train', running_loss, epoch)
 
                 itr += 1
-            verbose and print('Done with epoch {} in {}s'.format(epoch, time.time()-t0))
+            # verbose and print('Done with epoch {} in {}s'.format(epoch, time.time()-t0))
 
         torch.save(model.state_dict(), self.model_fn)
         print('Saved model at {}'.format(self.model_fn))

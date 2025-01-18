@@ -6,6 +6,7 @@ import numpy as np
 import sys
 import pdb
 
+os.environ['CoCo'] = "/home/vietanhle/github/Fork/CoCo"
 sys.path.insert(1, os.environ['CoCo'])
 
 from core import Problem

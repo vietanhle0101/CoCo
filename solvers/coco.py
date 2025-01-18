@@ -42,10 +42,10 @@ class CoCo(Solver):
         # training parameters
         self.training_params = {}
         self.training_params['TRAINING_ITERATIONS'] = int(1500)
-        self.training_params['BATCH_SIZE'] = 64
-        self.training_params['CHECKPOINT_AFTER'] = int(1000)
+        self.training_params['BATCH_SIZE'] = 128
+        self.training_params['CHECKPOINT_AFTER'] = int(20000)
         self.training_params['SAVEPOINT_AFTER'] = int(30000)
-        self.training_params['TEST_BATCH_SIZE'] = 32
+        self.training_params['TEST_BATCH_SIZE'] = 320
 
     def construct_strategies(self, n_features, train_data, test_data=None):
         """ Reads in training data and constructs strategy dictonary
@@ -55,7 +55,7 @@ class CoCo(Solver):
         self.strategy_dict = {}
 
         p_train = train_data[0]
-        y_train = train_data[-3]
+        y_train = train_data[3]
         for k in p_train.keys():
             self.num_train = len(p_train[k])
 
@@ -181,7 +181,7 @@ class CoCo(Solver):
                     # writer.add_scalar('Loss/train', running_loss, epoch)
 
                 itr += 1
-            verbose and print('Done with epoch {} in {}s'.format(epoch, time.time()-t0))
+            # verbose and print('Done with epoch {} in {}s'.format(epoch, time.time()-t0))
 
         torch.save(model.state_dict(), self.model_fn)
         print('Saved model at {}'.format(self.model_fn))
