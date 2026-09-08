@@ -8,3 +8,6 @@ env
 .codex
 .matplotlib
 .venv
+
+*.png
+cartpole/data/

@@ -21,7 +21,8 @@ class Cartpole(Problem):
     """Class to setup + solve cartpole problems."""
 
     def __init__(self, config=None, solver=cp.GUROBI, prob_params=None,
-                 sampled_params=None):
+                 sampled_params=None, state_slack_weight=0.0,
+                 state_slack_max=None):
         """Constructor for Cartpole class.
 
         Args:
@@ -31,8 +32,23 @@ class Cartpole(Problem):
                 no configuration file is loaded.
             sampled_params: names of varying parameters when ``prob_params``
                 is supplied; defaults to ``['x0', 'xg']``.
+            state_slack_weight: if positive, the state box constraints
+                (``x_min``/``x_max``) become soft: a per-stage nonnegative
+                slack widens them symmetrically, penalized quadratically by
+                this weight. 0 (default) keeps the original hard constraints,
+                so existing callers are unaffected.
+            state_slack_max: optional length-``n`` cap on the slack. Needed
+                whenever the wall-contact big-M constants (``delta_min/max``,
+                ``sc_min/max`` in ``prob_params``) were not sized to already
+                cover the slack range -- otherwise the state box becomes soft
+                while the (still hard) wall logic does not, and a large slack
+                excursion can make the wall constraints themselves infeasible.
         """
         super().__init__()
+        self.state_slack_weight = state_slack_weight
+        self.state_slack_max = (
+            None if state_slack_max is None else np.asarray(state_slack_max, dtype=float)
+        )
 
         ## TODO(pculbertson): allow different sets of params to vary.
         if prob_params is None:
@@ -59,8 +75,10 @@ class Cartpole(Problem):
         # A zero affine term reproduces the original LTI dynamics.  It can be
         # replaced with a stage-wise term for sequentially linearized MPC.
         self.ck = np.zeros((self.n, self.N - 1))
-        # Kept at one for the original planning/data-generation formulation.
+        # Preserve the original terminal Q penalty unless MPC explicitly
+        # replaces it by a full terminal quadratic matrix.
         self.terminal_weight = 1.0
+        self.terminal_cost = self.Q.copy()
 
         self.init_bin_problem()
         self.init_mlopt_problem()
@@ -97,10 +115,33 @@ class Cartpole(Problem):
         self.init_mlopt_problem()
 
     def set_terminal_weight(self, weight):
-        """Set a positive multiplier on the final-state tracking penalty."""
+        """Set a positive scalar multiplier on the original terminal Q cost.
+
+        This compatibility helper intentionally resets any custom terminal
+        matrix installed with :meth:`set_terminal_cost`.
+        """
         if weight <= 0:
             raise ValueError("terminal weight must be positive")
         self.terminal_weight = float(weight)
+        self.terminal_cost = self.terminal_weight * self.Q
+        self.init_bin_problem()
+        self.init_mlopt_problem()
+
+    def set_terminal_cost(self, terminal_cost):
+        """Set the final-state quadratic penalty matrix.
+
+        ``terminal_cost`` must be an ``n``-by-``n`` symmetric positive
+        semidefinite matrix, e.g. the stabilizing solution of a discrete
+        algebraic Riccati equation.  Stage costs remain unchanged.
+        """
+        terminal_cost = np.asarray(terminal_cost, dtype=float)
+        if terminal_cost.shape != (self.n, self.n):
+            raise ValueError("terminal_cost must have shape (n, n)")
+        terminal_cost = 0.5 * (terminal_cost + terminal_cost.T)
+        if np.min(np.linalg.eigvalsh(terminal_cost)) < -1e-10:
+            raise ValueError("terminal_cost must be positive semidefinite")
+        self.terminal_weight = None
+        self.terminal_cost = terminal_cost
         self.init_bin_problem()
         self.init_mlopt_problem()
 
@@ -118,7 +159,7 @@ class Cartpole(Problem):
         self.bin_prob_parameters = {'x0': x0, 'xg': xg}
 
         # Initial condition
-        cons += [x[:,0] == x0] 
+        cons += [x[:,0] == x0]
 
         # Dynamics constraints
         for kk in range(self.N-1):
@@ -126,82 +167,19 @@ class Cartpole(Problem):
             cons += [x[:,kk+1] == ak @ x[:,kk] + bk @ u[:,kk] + ck]
 
         # State and control constraints
+        state_slack = None
+        if self.state_slack_weight > 0:
+            state_slack = cp.Variable((self.n, self.N), nonneg=True)
+            self.bin_prob_variables['state_slack'] = state_slack
         for kk in range(self.N):
-            cons += [self.x_min - x[:,kk] <= np.zeros(self.n)]
-            cons += [x[:,kk] - self.x_max <= np.zeros(self.n)]
-
-        for kk in range(self.N-1):
-            cons += [self.uc_min - u[0,kk] <= 0.]
-            cons += [u[0,kk] - self.uc_max <= 0.]
-
-        # Binary variable constraints
-        for kk in range(self.N-1):
-            for jj in range(2):
-                if jj == 0:
-                    d_k    = -x[0,kk] + self.l*x[1,kk] - self.dist
-                    dd_k   = -x[2,kk] + self.l*x[3,kk]
-                else:
-                    d_k    =  x[0,kk] - self.l*x[1,kk] - self.dist
-                    dd_k   =  x[2,kk] - self.l*x[3,kk]
-
-                y_l, y_r = y[2*jj:2*jj+2,kk]
-                d_min, d_max = self.delta_min[jj], self.delta_max[jj]
-                dd_min, dd_max = self.ddelta_min[jj], self.ddelta_max[jj]
-                f_min, f_max = self.sc_min[jj], self.sc_max[jj]
-
-                # Eq. (26a)
-                cons += [d_min*(1-y_l) <= d_k]
-                cons += [d_k <= d_max*y_l]
-
-                # Eq. (26b)
-                cons += [f_min*(1-y_r) <= self.kappa*d_k + self.nu*dd_k]
-                cons += [self.kappa*d_k + self.nu*dd_k <= f_max*y_r]
-
-                # Eq. (27)
-                cons += [self.nu*dd_max*(y_l-1) <=
-                         sc[jj,kk] - self.kappa*d_k - self.nu*dd_k]
-                cons += [sc[jj,kk] - self.kappa*d_k - self.nu*dd_k <= 
-                         f_min*(y_r-1)]
-
-                cons += [-sc[jj,kk] <= 0]
-                cons += [sc[jj,kk] <= f_max*y_l]
-                cons += [sc[jj,kk] <= f_max*y_r]
-
-            # LQR cost
-            lqr_cost = 0.
-            for kk in range(self.N):
-                weight = self.terminal_weight if kk == self.N - 1 else 1.0
-                lqr_cost += weight * cp.quad_form(x[:,kk]-xg, self.Q)
-            for kk in range(self.N-1):
-                lqr_cost += cp.quad_form(u[:,kk],self.R)
-
-        self.bin_prob = cp.Problem(cp.Minimize(lqr_cost), cons)
-
-    def init_mlopt_problem(self):
-        cons = []
-
-        x = cp.Variable((self.n,self.N))
-        u = cp.Variable((self.m, self.N-1))
-        sc = u[1:,:]
-        self.mlopt_prob_variables = {'x':x, 'u':u}
-
-        x0 = cp.Parameter(self.n)
-        xg = cp.Parameter(self.n)
-        y = cp.Parameter((4, self.N-1))
-        self.mlopt_prob_parameters = {'x0': x0, 'xg': xg, 'y': y}
-
-        # Initial condition
-        cons += [x[:,0] == x0] 
-
-        # Dynamics constraints
-        for kk in range(self.N-1):
-            ak, bk, ck = self._dynamics_at(kk)
-            cons += [x[:,kk+1] == ak @ x[:,kk] + bk @ u[:,kk] + ck]
-
-        # State and control constraints
-        for kk in range(self.N):
-            cons += [self.x_min - x[:,kk] <= np.zeros(self.n)]
-            cons += [x[:,kk] - self.x_max <= np.zeros(self.n)]
+            if state_slack is None:
+                cons += [self.x_min - x[:,kk] <= np.zeros(self.n)]
+                cons += [x[:,kk] - self.x_max <= np.zeros(self.n)]
+            else:
+                cons += [self.x_min - x[:,kk] <= state_slack[:,kk]]
+                cons += [x[:,kk] - self.x_max <= state_slack[:,kk]]
+                if self.state_slack_max is not None:
+                    cons += [state_slack[:,kk] <= self.state_slack_max]
 
         for kk in range(self.N-1):
             cons += [self.uc_min - u[0,kk] <= 0.]
@@ -240,13 +218,100 @@ class Cartpole(Problem):
                 cons += [sc[jj,kk] <= f_max*y_l]
                 cons += [sc[jj,kk] <= f_max*y_r]
 
-            # LQR cost
-            lqr_cost = 0.
-            for kk in range(self.N):
-                weight = self.terminal_weight if kk == self.N - 1 else 1.0
-                lqr_cost += weight * cp.quad_form(x[:,kk]-xg, self.Q)
-            for kk in range(self.N-1):
-                lqr_cost += cp.quad_form(u[:,kk],self.R)
+        # LQR objective
+        lqr_cost = 0.
+        for kk in range(self.N):
+            cost_matrix = self.terminal_cost if kk == self.N - 1 else self.Q
+            lqr_cost += cp.quad_form(x[:,kk]-xg, cost_matrix)
+        for kk in range(self.N-1):
+            lqr_cost += cp.quad_form(u[:,kk],self.R)
+        if state_slack is not None:
+            lqr_cost += self.state_slack_weight * cp.sum_squares(state_slack)
+
+        self.bin_prob = cp.Problem(cp.Minimize(lqr_cost), cons)
+
+    def init_mlopt_problem(self):
+        cons = []
+
+        x = cp.Variable((self.n,self.N))
+        u = cp.Variable((self.m, self.N-1))
+        sc = u[1:,:]
+        self.mlopt_prob_variables = {'x':x, 'u':u}
+
+        x0 = cp.Parameter(self.n)
+        xg = cp.Parameter(self.n)
+        y = cp.Parameter((4, self.N-1))
+        self.mlopt_prob_parameters = {'x0': x0, 'xg': xg, 'y': y}
+
+        # Initial condition
+        cons += [x[:,0] == x0]
+
+        # Dynamics constraints
+        for kk in range(self.N-1):
+            ak, bk, ck = self._dynamics_at(kk)
+            cons += [x[:,kk+1] == ak @ x[:,kk] + bk @ u[:,kk] + ck]
+
+        # State and control constraints
+        state_slack = None
+        if self.state_slack_weight > 0:
+            state_slack = cp.Variable((self.n, self.N), nonneg=True)
+            self.mlopt_prob_variables['state_slack'] = state_slack
+        for kk in range(self.N):
+            if state_slack is None:
+                cons += [self.x_min - x[:,kk] <= np.zeros(self.n)]
+                cons += [x[:,kk] - self.x_max <= np.zeros(self.n)]
+            else:
+                cons += [self.x_min - x[:,kk] <= state_slack[:,kk]]
+                cons += [x[:,kk] - self.x_max <= state_slack[:,kk]]
+                if self.state_slack_max is not None:
+                    cons += [state_slack[:,kk] <= self.state_slack_max]
+
+        for kk in range(self.N-1):
+            cons += [self.uc_min - u[0,kk] <= 0.]
+            cons += [u[0,kk] - self.uc_max <= 0.]
+
+        # Binary variable constraints
+        for kk in range(self.N-1):
+            for jj in range(2):
+                if jj == 0:
+                    d_k    = -x[0,kk] + self.l*x[1,kk] - self.dist
+                    dd_k   = -x[2,kk] + self.l*x[3,kk]
+                else:
+                    d_k    =  x[0,kk] - self.l*x[1,kk] - self.dist
+                    dd_k   =  x[2,kk] - self.l*x[3,kk]
+
+                y_l, y_r = y[2*jj:2*jj+2,kk]
+                d_min, d_max = self.delta_min[jj], self.delta_max[jj]
+                dd_min, dd_max = self.ddelta_min[jj], self.ddelta_max[jj]
+                f_min, f_max = self.sc_min[jj], self.sc_max[jj]
+
+                # Eq. (26a)
+                cons += [d_min*(1-y_l) <= d_k]
+                cons += [d_k <= d_max*y_l]
+
+                # Eq. (26b)
+                cons += [f_min*(1-y_r) <= self.kappa*d_k + self.nu*dd_k]
+                cons += [self.kappa*d_k + self.nu*dd_k <= f_max*y_r]
+
+                # Eq. (27)
+                cons += [self.nu*dd_max*(y_l-1) <=
+                         sc[jj,kk] - self.kappa*d_k - self.nu*dd_k]
+                cons += [sc[jj,kk] - self.kappa*d_k - self.nu*dd_k <=
+                         f_min*(y_r-1)]
+
+                cons += [-sc[jj,kk] <= 0]
+                cons += [sc[jj,kk] <= f_max*y_l]
+                cons += [sc[jj,kk] <= f_max*y_r]
+
+        # LQR objective
+        lqr_cost = 0.
+        for kk in range(self.N):
+            cost_matrix = self.terminal_cost if kk == self.N - 1 else self.Q
+            lqr_cost += cp.quad_form(x[:,kk]-xg, cost_matrix)
+        for kk in range(self.N-1):
+            lqr_cost += cp.quad_form(u[:,kk],self.R)
+        if state_slack is not None:
+            lqr_cost += self.state_slack_weight * cp.sum_squares(state_slack)
 
         self.mlopt_prob = cp.Problem(cp.Minimize(lqr_cost), cons)
 

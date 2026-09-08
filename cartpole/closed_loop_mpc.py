@@ -13,8 +13,10 @@ from pathlib import Path
 
 import cvxpy as cp
 import numpy as np
+from scipy.linalg import solve_discrete_are
 
 ROOT = Path(__file__).resolve().parents[1]
+THETA_LIMIT = np.pi / 8
 # The default Matplotlib config directory may be read-only in a virtualenv or
 # remote workspace.  Configure it before importing pyplot.
 os.environ.setdefault("MPLCONFIGDIR", str(ROOT / ".matplotlib"))
@@ -22,14 +24,40 @@ os.environ.setdefault("MPLCONFIGDIR", str(ROOT / ".matplotlib"))
 import matplotlib.pyplot as plt
 
 from cartpole import Cartpole
+try:
+    from .mujoco_soft_walls import SoftWallCartpole
+except ImportError:  # Supports direct execution: python cartpole/closed_loop_mpc.py
+    from mujoco_soft_walls import SoftWallCartpole
 
 
-def make_mpc_problem(horizon, timestep, theta_limit):
+def terminal_lqr_cost(a, cart_input, q, cart_input_cost):
+    """Return the stabilizing discrete-time LQR terminal-cost matrix.
+
+    The terminal region is the upright, no-contact region.  Consequently the
+    feedback law uses only the cart-force column of the input matrix: the
+    wall reactions are identically zero there and are not free actuators.
+    """
+    b = np.asarray(cart_input, dtype=float).reshape(-1, 1)
+    r = np.array([[float(cart_input_cost)]])
+    return solve_discrete_are(a, b, q, r)
+
+
+def make_mpc_problem(horizon, timestep, theta_limit, state_slack_weight=0.0,
+                      wall_force_weight=5.0):
     """Create an MPC-only model override without changing saved datasets."""
     config_path = Path(__file__).with_name("config") / "default.p"
     with config_path.open("rb") as config_file:
         _, parameters, sampled_params = pickle.load(config_file)
     parameters = list(parameters)
+    # The saved config gives s_L/s_R zero cost (R = diag([1, 0, 0])), so wall
+    # force is "free" to the optimizer -- it will happily lean on the wall to
+    # catch a falling pole even when that burns most of the track, then have
+    # no incentive to spend real (R-priced) cart force clawing the cart back
+    # afterward. Pricing wall force discourages using it more than needed.
+    r = np.array(parameters[4], dtype=float).copy()
+    r[1, 1] = wall_force_weight
+    r[2, 2] = wall_force_weight
+    parameters[4] = r
     x_min, x_max = parameters[5], parameters[6]
     ddelta_min, ddelta_max = parameters[13], parameters[14]
     gravity, length = parameters[16], parameters[17]
@@ -52,19 +80,55 @@ def make_mpc_problem(horizon, timestep, theta_limit):
     x_max = np.asarray(x_max, dtype=float).copy()
     x_max[1] = theta_limit
     x_min = -x_max
+
+    # The wall-contact big-M constants below must stay valid over whatever
+    # range the (nonnegative, capped) state slack can reach -- otherwise the
+    # state box becomes soft while the wall logic built on top of it stays
+    # hard, and a large slack excursion makes the wall constraints
+    # themselves infeasible. Size the slack cap and the big-M's off the same
+    # margin so that can't happen.
+    state_slack_max = None
+    bigm_min, bigm_max = x_min, x_max
+    if state_slack_weight > 0:
+        state_slack_max = x_max - x_min
+        bigm_min = x_min - state_slack_max
+        bigm_max = x_max + state_slack_max
+
     delta_min = np.array([
-        -x_max[0] + length * x_min[1] - distance,
-        x_min[0] - length * x_max[1] - distance,
+        -bigm_max[0] + length * bigm_min[1] - distance,
+        bigm_min[0] - length * bigm_max[1] - distance,
     ])
     delta_max = np.array([
-        -x_min[0] + length * x_max[1] - distance,
-        x_max[0] - length * x_min[1] - distance,
+        -bigm_min[0] + length * bigm_max[1] - distance,
+        bigm_max[0] - length * bigm_min[1] - distance,
     ])
+    if state_slack_weight > 0:
+        ddelta_min = np.array([
+            -bigm_max[2] + length * bigm_min[3],
+            bigm_min[2] - length * bigm_max[3],
+        ])
+        ddelta_max = np.array([
+            -bigm_min[2] + length * bigm_max[3],
+            bigm_max[2] - length * bigm_min[3],
+        ])
     parameters[5], parameters[6] = x_min, x_max
     parameters[9] = kappa * delta_min + nu * ddelta_min
     parameters[10] = kappa * delta_max + nu * ddelta_max
     parameters[11], parameters[12] = delta_min, delta_max
-    return Cartpole(prob_params=parameters, sampled_params=sampled_params)
+    parameters[13], parameters[14] = ddelta_min, ddelta_max
+    problem = Cartpole(
+        prob_params=parameters, sampled_params=sampled_params,
+        state_slack_weight=state_slack_weight, state_slack_max=state_slack_max,
+    )
+    # Use the discrete LQR value function around the upright/no-contact
+    # equilibrium as the terminal penalty.  This replaces the old Q-only
+    # terminal stage cost and makes the finite-horizon controller much less
+    # myopic without pretending that wall forces are terminal actuators.
+    terminal_p = terminal_lqr_cost(
+        parameters[1], parameters[2][:, 0], parameters[3], parameters[4][0, 0]
+    )
+    problem.set_terminal_cost(terminal_p)
+    return problem
 
 
 def nonlinear_step(problem, state, control):
@@ -110,14 +174,58 @@ def linearize_at_current_state(problem, state):
     return a, b, c
 
 
-def run_mpc(initial_state, goal_state, steps, horizon, timestep, theta_limit):
-    """Run MPC with one system linearization at each current state."""
-    problem = make_mpc_problem(horizon, timestep, theta_limit)
+def make_mujoco_plant(timestep):
+    """Create the physical MuJoCo plant and the MPC-dt substep count.
+
+    ``contact_mode="explicit"`` disables physical wall collision and accepts
+    the MIQP's explicit [s_L, s_R] inputs as pole-hinge torque. The MPC
+    control period must land on a MuJoCo step boundary.
+    """
+    simulator = SoftWallCartpole(contact_mode="explicit")
+    substeps = timestep / simulator.dt
+    if abs(substeps - round(substeps)) > 1e-6:
+        raise ValueError(
+            f"--dt={timestep} must be a whole multiple of the MuJoCo model "
+            f"timestep ({simulator.dt}s) for the --plant mujoco backend."
+        )
+    return simulator, round(substeps)
+
+
+def run_mpc(initial_state, goal_state, steps, horizon, timestep, theta_limit,
+            plant="toy", state_slack_weight=0.0, wall_force_weight=5.0):
+    """Run MPC with one system linearization at each current state.
+
+    Args:
+        plant: "toy" rolls out the sine-based ``nonlinear_step`` model used to
+            derive the linearization. "mujoco" executes the full first MIQP
+            input [u_c, s_L, s_R] on the MuJoCo point-mass pole model. Its
+            visual walls have no physical contact in this explicit-force mode.
+        state_slack_weight: if positive, state bounds become soft (see
+            ``Cartpole``) so a temporarily-unrecoverable state under this
+            horizon/actuator limit no longer raises ``RuntimeError`` -- it is
+            instead penalized and, if actually exceeded, means the plan
+            could not keep the state in bounds even at that penalty.
+        wall_force_weight: quadratic cost weight on s_L/s_R (0 in the saved
+            dataset config). Without this, wall force is free to the
+            optimizer, so it will happily burn the whole track leaning on
+            the wall to catch a falling pole and never pays to return.
+    """
+    if plant not in ("toy", "mujoco"):
+        raise ValueError("plant must be 'toy' or 'mujoco'")
+
+    problem = make_mpc_problem(
+        horizon, timestep, theta_limit, state_slack_weight, wall_force_weight
+    )
     states = np.empty((steps + 1, problem.n))
     controls = np.empty((steps, problem.m))
     costs = np.empty(steps)
     solve_times = np.empty(steps)
     states[0] = initial_state
+
+    simulator = substeps = None
+    if plant == "mujoco":
+        simulator, substeps = make_mujoco_plant(timestep)
+        simulator.reset(initial_state)
 
     for k in range(steps):
         # Linearize only at the measured x_k and keep this model fixed across
@@ -130,7 +238,7 @@ def run_mpc(initial_state, goal_state, steps, horizon, timestep, theta_limit):
             np.repeat(c[:, None], stages, axis=1),
         )
         parameters = {"x0": states[k], "xg": goal_state}
-        success, cost, solve_time, (_, optimal_inputs, _) = problem.solve_micp(
+        success, cost, solve_time, (_, optimal_inputs, y_star) = problem.solve_micp(
             parameters, solver=cp.GUROBI
         )
         if not success:
@@ -141,19 +249,34 @@ def run_mpc(initial_state, goal_state, steps, horizon, timestep, theta_limit):
 
         # Receding-horizon control: apply the first input only, then replan.
         controls[k] = optimal_inputs[:, 0]
-        states[k + 1] = nonlinear_step(problem, states[k], controls[k])
+        if plant == "toy":
+            states[k + 1] = nonlinear_step(problem, states[k], controls[k])
+        else:
+            # Apply all three values selected by the MIQP. The explicit-mode
+            # simulator maps s_L/s_R to l * (s_R - s_L) hinge torque.
+            next_state, _ = simulator.step(
+                controls[k, 0], soft_wall_forces=controls[k, 1:], substeps=substeps
+            )
+            states[k + 1] = next_state
         costs[k] = cost
         solve_times[k] = solve_time
+        # y_star[:,0] is this step's binary contact indicators [y_l, y_r] per
+        # wall (jj=0 left, jj=1 right); s_L/s_R are only nonzero when both are
+        # active, so "contact" here means the wall's y pair is fully engaged.
+        left_contact = bool(y_star[0, 0]) and bool(y_star[1, 0])
+        right_contact = bool(y_star[2, 0]) and bool(y_star[3, 0])
         print(
-            f"step {k + 1:02d}/{steps}: cost={cost:.3f}, "
-            f"solve={solve_time:.4f}s, u={controls[k]}"
+            f"step {k + 1:02d}/{steps}: state={states[k]}, cost={cost:.3f}, "
+            f"solve={solve_time:.4f}s, u={controls[k]}, "
+            f"contact=[left={left_contact}, right={right_contact}]"
         )
 
     return problem, states, controls, costs, solve_times
 
 
 def plot_trajectory(problem, states, controls, goal_state, output_path):
-    """Plot states, cart/contact inputs, and cart position against its bounds."""
+    """Plot states, cart/contact inputs, and cart position against its bounds.
+    """
     time_state = np.arange(len(states)) * problem.dh
     time_input = np.arange(len(controls)) * problem.dh
     labels = [r"cart position $p$", r"pole angle $\theta$", r"cart velocity $\dot p$", r"pole rate $\dot\theta$"]
@@ -187,12 +310,27 @@ def plot_trajectory(problem, states, controls, goal_state, output_path):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--steps", type=int, default=40, help="Number of MPC updates.")
-    parser.add_argument("--horizon", type=int, default=50, help="Number of predicted states.")
+    parser.add_argument("--steps", type=int, default=100, help="Number of MPC updates.")
+    parser.add_argument("--horizon", type=int, default=20, help="Number of predicted states.")
     parser.add_argument("--dt", type=float, default=0.02, help="MPC and simulation timestep [s].")
     parser.add_argument(
-        "--theta-limit", type=float, default=np.pi / 2,
-        help="Symmetric pole-angle state bound in radians (default: pi/2).",
+        "--plant", choices=("toy", "mujoco"), default="toy",
+        help="Rollout the sine-based toy model (default) or a physically "
+             "simulated MuJoCo cart-pole with explicit MIQP soft-wall forces.",
+    )
+    parser.add_argument(
+        "--state-slack-weight", type=float, default=0.0,
+        help="If positive, soften all state bounds with a quadratically "
+             "penalized slack instead of a hard constraint, so the MIQP "
+             "stays feasible when the horizon/actuator limits can't "
+             "otherwise keep the plan in bounds (default: 0, hard bounds).",
+    )
+    parser.add_argument(
+        "--wall-force-weight", type=float, default=5.0,
+        help="Quadratic cost weight on s_L/s_R (0 in the saved dataset "
+             "config, where wall force is a free actuator). Discourages "
+             "burning the whole track leaning on the wall to catch the pole "
+             "and never paying to return (default: 5.0; use 0 to disable).",
     )
     parser.add_argument(
         "--x0", type=float, nargs=4, default=[0.1, 0.0, 0.0, 0.0],
@@ -207,12 +345,13 @@ def main():
         help="Destination PNG path.",
     )
     args = parser.parse_args()
-    if args.steps < 1 or args.horizon < 2 or args.dt <= 0 or args.theta_limit <= 0:
-        parser.error("--steps, --theta-limit, and --dt must be positive; --horizon must be at least 2")
+    if args.steps < 1 or args.horizon < 2 or args.dt <= 0:
+        parser.error("--steps and --dt must be positive; --horizon must be at least 2")
 
     problem, states, controls, costs, solve_times = run_mpc(
         np.asarray(args.x0), np.asarray(args.goal), args.steps, args.horizon, args.dt,
-        args.theta_limit,
+        THETA_LIMIT, plant=args.plant, state_slack_weight=args.state_slack_weight,
+        wall_force_weight=args.wall_force_weight,
     )
     plot_trajectory(problem, states, controls, np.asarray(args.goal), args.plot)
     print(f"Saved plot to {args.plot}")
