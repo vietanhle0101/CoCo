@@ -1,0 +1,41 @@
+<mujoco model="soft_wall_cartpole">
+  <compiler angle="radian" autolimits="true"/>
+  <option timestep="0.002" gravity="0 0 -9.81" integrator="RK4"/>
+
+  <default>
+    <joint damping="0.02"/>
+    <!-- Soft, damped compliant contact. -->
+    <geom friction="0.8 0.05 0.01" solref="0.10 1" solimp="0.70 0.90 0.01"/>
+  </default>
+
+  <worldbody>
+    <geom name="floor" type="plane" size="3 3 0.1" rgba="0.2 0.2 0.2 1"/>
+    <light pos="0 0 3" directional="true"/>
+    <camera name="overview" pos="2.4 -3.0 1.7" xyaxes="0.78 0.62 0 -0.28 0.35 0.89"/>
+
+    <!-- The cart does not collide with the walls. -->
+    <body name="cart" pos="0 0 0.12">
+      <joint name="cart_slide" type="slide" axis="1 0 0" range="-0.5 0.5"/>
+      <geom name="cart_geom" type="box" size="0.09 0.12 0.06" mass="1" contype="0" conaffinity="0" rgba="0.15 0.3 0.8 1"/>
+      <body name="pole" pos="0 0 0.06">
+        <!-- Zero angle is the upright, unstable configuration. -->
+        <!-- Positive theta moves the tip left: tip_x = p - l*sin(theta). -->
+        <joint name="pole_hinge" type="hinge" axis="0 -1 0" damping="0.03"/>
+        <!-- Massless visual rod plus a point-mass approximation at the tip.
+             This matches the point-mass pole assumed by the MIQP matrices. -->
+        <geom name="pole_geom" type="capsule" fromto="0 0 0 0 0 1" size="0.018" mass="0" rgba="0.95 0.35 0.1 1"/>
+        <geom name="tip_mass" type="sphere" pos="0 0 1" size="0.03" mass="1" rgba="0.95 0.35 0.1 1"/>
+        <site name="pole_tip" pos="0 0 1" size="0.025" rgba="0.9 0.9 0.1 1"/>
+      </body>
+    </body>
+
+    <!-- Collision-capable walls. The Python simulator enables them only in
+         its 'mujoco' contact mode, never alongside explicit MIQP forces. -->
+    <geom name="left_wall" type="box" pos="-0.5 0 0.62" size="0.02 0.35 0.62" rgba="0.7 0.7 0.7 1"/>
+    <geom name="right_wall" type="box" pos="0.5 0 0.62" size="0.02 0.35 0.62" rgba="0.7 0.7 0.7 1"/>
+  </worldbody>
+
+  <actuator>
+    <motor name="cart_force" joint="cart_slide" gear="1" ctrllimited="true" ctrlrange="-2 2"/>
+  </actuator>
+</mujoco>

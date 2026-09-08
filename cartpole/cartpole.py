@@ -6,30 +6,45 @@ import numpy as np
 import sys
 import pdb
 
-sys.path.insert(1, os.environ['CoCo'])
+# The original notebooks expected a ``CoCo`` environment variable to contain
+# the repository root.  Derive that path from this module when it is not set so
+# Cartpole can also be imported directly from a project-local virtualenv.
+project_root = os.environ.get(
+    'CoCo', os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+)
+if project_root not in sys.path:
+    sys.path.insert(1, project_root)
 
 from core import Problem
 
 class Cartpole(Problem):
     """Class to setup + solve cartpole problems."""
 
-    def __init__(self, config=None, solver=cp.GUROBI):
+    def __init__(self, config=None, solver=cp.GUROBI, prob_params=None,
+                 sampled_params=None):
         """Constructor for Cartpole class.
 
         Args:
             config: full path to config file. if None, load default config.
             solver: solver object to be used by cvxpy
+            prob_params: optional in-memory problem parameters. When supplied,
+                no configuration file is loaded.
+            sampled_params: names of varying parameters when ``prob_params``
+                is supplied; defaults to ``['x0', 'xg']``.
         """
         super().__init__()
 
         ## TODO(pculbertson): allow different sets of params to vary.
-        if config is None: #use default config
-            relative_path = os.path.dirname(os.path.abspath(__file__))
-            config = relative_path + '/config/default.p'
+        if prob_params is None:
+            if config is None: #use default config
+                relative_path = os.path.dirname(os.path.abspath(__file__))
+                config = relative_path + '/config/default.p'
 
-        config_file = open(config,"rb")
-        _, prob_params, self.sampled_params = pickle.load(config_file)
-        config_file.close()
+            config_file = open(config,"rb")
+            _, prob_params, self.sampled_params = pickle.load(config_file)
+            config_file.close()
+        else:
+            self.sampled_params = sampled_params or ['x0', 'xg']
         self.init_problem(prob_params)
 
     def init_problem(self,prob_params):
@@ -41,7 +56,51 @@ class Cartpole(Problem):
             self.delta_min, self.delta_max, self.ddelta_min, self.ddelta_max, \
             self.dh, self.g, self.l, self.mc, self.mp, self.kappa, \
             self.nu, self.dist = prob_params
+        # A zero affine term reproduces the original LTI dynamics.  It can be
+        # replaced with a stage-wise term for sequentially linearized MPC.
+        self.ck = np.zeros((self.n, self.N - 1))
+        # Kept at one for the original planning/data-generation formulation.
+        self.terminal_weight = 1.0
 
+        self.init_bin_problem()
+        self.init_mlopt_problem()
+
+    def _dynamics_at(self, step):
+        """Return the affine dynamics matrices at one horizon stage.
+
+        Default configurations store LTI matrices with shapes ``(n, n)`` and
+        ``(n, m)``.  Sequentially linearized MPC may instead provide one
+        matrix per stage, stacked along axis 2.
+        """
+        ak = self.Ak if self.Ak.ndim == 2 else self.Ak[:, :, step]
+        bk = self.Bk if self.Bk.ndim == 2 else self.Bk[:, :, step]
+        ck = self.ck[:, step]
+        return ak, bk, ck
+
+    def set_time_varying_dynamics(self, ak, bk, ck):
+        """Replace the dynamics with a stage-wise affine model and rebuild.
+
+        Args:
+            ak: State-transition matrices with shape ``(n, n, N-1)``.
+            bk: Input matrices with shape ``(n, m, N-1)``.
+            ck: Affine offsets with shape ``(n, N-1)``.
+        """
+        expected_stages = self.N - 1
+        if ak.shape != (self.n, self.n, expected_stages):
+            raise ValueError("ak must have shape (n, n, N-1)")
+        if bk.shape != (self.n, self.m, expected_stages):
+            raise ValueError("bk must have shape (n, m, N-1)")
+        if ck.shape != (self.n, expected_stages):
+            raise ValueError("ck must have shape (n, N-1)")
+        self.Ak, self.Bk, self.ck = ak, bk, ck
+        self.init_bin_problem()
+        self.init_mlopt_problem()
+
+    def set_terminal_weight(self, weight):
+        """Set a positive multiplier on the final-state tracking penalty."""
+        if weight <= 0:
+            raise ValueError("terminal weight must be positive")
+        self.terminal_weight = float(weight)
         self.init_bin_problem()
         self.init_mlopt_problem()
 
@@ -63,8 +122,8 @@ class Cartpole(Problem):
 
         # Dynamics constraints
         for kk in range(self.N-1):
-            cons += [x[:,kk+1] - (self.Ak @ x[:,kk]
-                + self.Bk @ u[:,kk]) == np.zeros(self.n)]
+            ak, bk, ck = self._dynamics_at(kk)
+            cons += [x[:,kk+1] == ak @ x[:,kk] + bk @ u[:,kk] + ck]
 
         # State and control constraints
         for kk in range(self.N):
@@ -111,7 +170,8 @@ class Cartpole(Problem):
             # LQR cost
             lqr_cost = 0.
             for kk in range(self.N):
-                lqr_cost += cp.quad_form(x[:,kk]-xg, self.Q)
+                weight = self.terminal_weight if kk == self.N - 1 else 1.0
+                lqr_cost += weight * cp.quad_form(x[:,kk]-xg, self.Q)
             for kk in range(self.N-1):
                 lqr_cost += cp.quad_form(u[:,kk],self.R)
 
@@ -135,8 +195,8 @@ class Cartpole(Problem):
 
         # Dynamics constraints
         for kk in range(self.N-1):
-            cons += [x[:,kk+1] - (self.Ak @ x[:,kk]
-                + self.Bk @ u[:,kk]) == np.zeros(self.n)]
+            ak, bk, ck = self._dynamics_at(kk)
+            cons += [x[:,kk+1] == ak @ x[:,kk] + bk @ u[:,kk] + ck]
 
         # State and control constraints
         for kk in range(self.N):
@@ -183,7 +243,8 @@ class Cartpole(Problem):
             # LQR cost
             lqr_cost = 0.
             for kk in range(self.N):
-                lqr_cost += cp.quad_form(x[:,kk]-xg, self.Q)
+                weight = self.terminal_weight if kk == self.N - 1 else 1.0
+                lqr_cost += weight * cp.quad_form(x[:,kk]-xg, self.Q)
             for kk in range(self.N-1):
                 lqr_cost += cp.quad_form(u[:,kk],self.R)
 
@@ -204,16 +265,16 @@ class Cartpole(Problem):
         ## TODO(pculbertson): allow different sets of params to vary.
         
         # solve problem with cvxpy
-        prob_success, cost, solve_time = False, np.Inf, np.Inf
+        prob_success, cost, solve_time = False, np.inf, np.inf
         if solver == cp.MOSEK:
             msk_param_dict = {}
-            with open(os.path.join(os.environ['CoCo'], 'config/mosek.yaml')) as file:
+            with open(os.path.join(project_root, 'config/mosek.yaml')) as file:
                 msk_param_dict = yaml.load(file, Loader=yaml.FullLoader)
 
             self.bin_prob.solve(solver=solver, mosek_params=msk_param_dict)
         elif solver == cp.GUROBI:
             grb_param_dict = {}
-            with open(os.path.join(os.environ['CoCo'], 'config/gurobi.yaml')) as file:
+            with open(os.path.join(project_root, 'config/gurobi.yaml')) as file:
                 grb_param_dict = yaml.load(file, Loader=yaml.FullLoader)
 
             self.bin_prob.solve(solver=solver, **grb_param_dict)
@@ -252,7 +313,7 @@ class Cartpole(Problem):
         ## TODO(pculbertson): allow different sets of params to vary.
 
         # solve problem with cvxpy
-        prob_success, cost, solve_time = False, np.Inf, np.Inf
+        prob_success, cost, solve_time = False, np.inf, np.inf
         self.mlopt_prob.solve(solver=solver)
 
         solve_time = self.mlopt_prob.solver_stats.solve_time

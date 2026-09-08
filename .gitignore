@@ -4,3 +4,7 @@
 **/__pycache__
 
 env
+.agents
+.codex
+.matplotlib
+.venv
