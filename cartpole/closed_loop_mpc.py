@@ -17,6 +17,8 @@ from scipy.linalg import solve_discrete_are
 
 ROOT = Path(__file__).resolve().parents[1]
 THETA_LIMIT = np.pi / 8
+WALL_DISTANCE = 0.5
+CART_FORCE_LIMIT = 2.0
 # The default Matplotlib config directory may be read-only in a virtualenv or
 # remote workspace.  Configure it before importing pyplot.
 os.environ.setdefault("MPLCONFIGDIR", str(ROOT / ".matplotlib"))
@@ -62,7 +64,10 @@ def make_mpc_problem(horizon, timestep, theta_limit, state_slack_weight=0.0,
     ddelta_min, ddelta_max = parameters[13], parameters[14]
     gravity, length = parameters[16], parameters[17]
     cart_mass, pole_mass = parameters[18], parameters[19]
-    kappa, nu, distance = parameters[20], parameters[21], parameters[22]
+    kappa, nu = parameters[20], parameters[21]
+    # Keep the MPC contact surfaces aligned with the MuJoCo wall locations.
+    # The cart's own travel limits remain those stored in x_min/x_max.
+    distance = WALL_DISTANCE
     continuous_a = np.zeros((4, 4))
     continuous_a[:2, 2:] = np.eye(2)
     continuous_a[2, 1] = gravity * pole_mass / cart_mass
@@ -76,6 +81,7 @@ def make_mpc_problem(horizon, timestep, theta_limit, state_slack_weight=0.0,
     parameters[0] = horizon
     parameters[1] = np.eye(4) + timestep * continuous_a
     parameters[2] = timestep * continuous_b
+    parameters[7], parameters[8] = -CART_FORCE_LIMIT, CART_FORCE_LIMIT
     parameters[15] = timestep
     x_max = np.asarray(x_max, dtype=float).copy()
     x_max[1] = theta_limit
@@ -116,6 +122,7 @@ def make_mpc_problem(horizon, timestep, theta_limit, state_slack_weight=0.0,
     parameters[10] = kappa * delta_max + nu * ddelta_max
     parameters[11], parameters[12] = delta_min, delta_max
     parameters[13], parameters[14] = ddelta_min, ddelta_max
+    parameters[22] = distance
     problem = Cartpole(
         prob_params=parameters, sampled_params=sampled_params,
         state_slack_weight=state_slack_weight, state_slack_max=state_slack_max,
@@ -214,7 +221,7 @@ def run_mpc(initial_state, goal_state, steps, horizon, timestep, theta_limit,
         raise ValueError("plant must be 'toy' or 'mujoco'")
 
     problem = make_mpc_problem(
-        horizon, timestep, theta_limit, state_slack_weight, wall_force_weight
+        horizon, timestep, theta_limit, state_slack_weight, wall_force_weight,
     )
     states = np.empty((steps + 1, problem.n))
     controls = np.empty((steps, problem.m))
@@ -308,6 +315,35 @@ def plot_trajectory(problem, states, controls, goal_state, output_path):
     plt.close(figure)
 
 
+def save_rollout(output_path, problem, states, controls, costs, solve_times,
+                 goal_state, plant):
+    """Save a self-describing MPC rollout for later replay or visualization.
+
+    The compressed NumPy archive intentionally stores raw state samples rather
+    than simulator-specific objects, so it can be replayed by the MuJoCo
+    visualizer regardless of whether this rollout used the toy or MuJoCo
+    plant.
+    """
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(
+        output_path,
+        time=np.arange(states.shape[0]) * problem.dh,
+        input_time=np.arange(controls.shape[0]) * problem.dh,
+        states=states,
+        controls=controls,
+        costs=costs,
+        solve_times=solve_times,
+        initial_state=states[0],
+        goal_state=goal_state,
+        timestep=np.array(problem.dh),
+        horizon=np.array(problem.N),
+        theta_limit=np.array(THETA_LIMIT),
+        plant=np.array(plant),
+        state_labels=np.array(["p", "theta", "p_dot", "theta_dot"]),
+        control_labels=np.array(["cart_force", "left_wall_force", "right_wall_force"]),
+    )
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--steps", type=int, default=100, help="Number of MPC updates.")
@@ -344,6 +380,11 @@ def main():
         "--plot", type=Path, default=ROOT / "cartpole" / "outputs" / "closed_loop_mpc.png",
         help="Destination PNG path.",
     )
+    parser.add_argument(
+        "--data", type=Path,
+        default=ROOT / "cartpole" / "data" / "closed_loop_mpc.npz",
+        help="Destination compressed rollout archive for later replay.",
+    )
     args = parser.parse_args()
     if args.steps < 1 or args.horizon < 2 or args.dt <= 0:
         parser.error("--steps and --dt must be positive; --horizon must be at least 2")
@@ -354,7 +395,12 @@ def main():
         wall_force_weight=args.wall_force_weight,
     )
     plot_trajectory(problem, states, controls, np.asarray(args.goal), args.plot)
+    save_rollout(
+        args.data, problem, states, controls, costs, solve_times,
+        np.asarray(args.goal), args.plant,
+    )
     print(f"Saved plot to {args.plot}")
+    print(f"Saved rollout data to {args.data}")
     print(f"Mean MIQP solve time: {np.mean(solve_times):.4f}s")
     print(f"Final state: {states[-1]}")
 

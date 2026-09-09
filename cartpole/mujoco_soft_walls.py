@@ -110,7 +110,8 @@ class SoftWallCartpole:
         if self.contact_mode == "mujoco" and not np.allclose(soft_wall_forces, 0.0):
             raise ValueError("explicit soft-wall forces are invalid in 'mujoco' contact mode")
         self._applied_soft_wall_forces = np.maximum(soft_wall_forces, 0.0)
-        self.data.ctrl[0] = np.clip(cart_force, -2.0, 2.0)
+        ctrl_min, ctrl_max = self.model.actuator_ctrlrange[0]
+        self.data.ctrl[0] = np.clip(cart_force, ctrl_min, ctrl_max)
         for _ in range(substeps):
             self.data.qfrc_applied[:] = 0.0
             if self.contact_mode == "explicit":

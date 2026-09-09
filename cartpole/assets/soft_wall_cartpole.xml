@@ -29,10 +29,24 @@
       </body>
     </body>
 
-    <!-- Collision-capable walls. The Python simulator enables them only in
-         its 'mujoco' contact mode, never alongside explicit MIQP forces. -->
-    <geom name="left_wall" type="box" pos="-0.5 0 0.62" size="0.02 0.35 0.62" rgba="0.7 0.7 0.7 1"/>
-    <geom name="right_wall" type="box" pos="0.5 0 0.62" size="0.02 0.35 0.62" rgba="0.7 0.7 0.7 1"/>
+    <!-- Collision-capable wall panels. The Python simulator enables the
+         named panels only in its 'mujoco' contact mode, never alongside
+         explicit MIQP forces. Each panel is visibly supported by two
+         non-colliding legs instead of being a solid wall to the ground. -->
+    <body name="left_wall_frame" pos="-0.5 0 0">
+      <geom name="left_wall" type="box" pos="0 0 0.895" size="0.02 0.35 0.345" rgba="0.7 0.7 0.7 1"/>
+      <geom name="left_wall_leg_front" type="box" pos="0 -0.28 0.275" size="0.03 0.03 0.275"
+            contype="0" conaffinity="0" rgba="0.25 0.25 0.25 1"/>
+      <geom name="left_wall_leg_back" type="box" pos="0 0.28 0.275" size="0.03 0.03 0.275"
+            contype="0" conaffinity="0" rgba="0.25 0.25 0.25 1"/>
+    </body>
+    <body name="right_wall_frame" pos="0.5 0 0">
+      <geom name="right_wall" type="box" pos="0 0 0.895" size="0.02 0.35 0.345" rgba="0.7 0.7 0.7 1"/>
+      <geom name="right_wall_leg_front" type="box" pos="0 -0.28 0.275" size="0.03 0.03 0.275"
+            contype="0" conaffinity="0" rgba="0.25 0.25 0.25 1"/>
+      <geom name="right_wall_leg_back" type="box" pos="0 0.28 0.275" size="0.03 0.03 0.275"
+            contype="0" conaffinity="0" rgba="0.25 0.25 0.25 1"/>
+    </body>
   </worldbody>
 
   <actuator>
