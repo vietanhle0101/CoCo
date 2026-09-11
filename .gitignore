@@ -11,3 +11,4 @@ env
 
 *.png
 cartpole/data/
+MUJOCO_LOG.TXT

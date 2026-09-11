@@ -3,7 +3,7 @@
 
 This is a new physics simulator, not the linear plant used by the repository's
 MIQP.  It has a 1 kg cart, 1 kg / 1 m pole, horizontal cart force limited to
-[-2, 2] and track limits at +/-0.5 m. ``explicit`` mode applies MIQP force
+[-10, 10] and track limits at +/-0.5 m. ``explicit`` mode applies MIQP force
 inputs s_L,s_R as hinge torque l*(s_R-s_L). ``mujoco`` mode enables compliant
 physical pole-wall contact and rejects explicit s_L,s_R inputs to avoid double
 counting contact forces.

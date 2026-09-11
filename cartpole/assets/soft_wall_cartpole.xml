@@ -35,6 +35,20 @@
          non-colliding legs instead of being a solid wall to the ground. -->
     <body name="left_wall_frame" pos="-0.5 0 0">
       <geom name="left_wall" type="box" pos="0 0 0.895" size="0.02 0.35 0.345" rgba="0.7 0.7 0.7 1"/>
+      <!-- Visual-only, non-colliding segments stacked over the same span as
+           left_wall above. visualize_rollout_mujoco.py hides left_wall
+           (alpha=0) during replay and displaces/tints these individually by
+           height, from the recorded contact force, so the panel appears to
+           bulge locally at the contact point rather than translate as one
+           rigid slab. Physics (the 'mujoco' contact mode elsewhere) still
+           uses left_wall unchanged; these never collide with anything. -->
+      <geom name="left_wall_seg0" type="box" pos="0 0 0.5993" size="0.02 0.35 0.0493" contype="0" conaffinity="0" rgba="0.7 0.7 0.7 1"/>
+      <geom name="left_wall_seg1" type="box" pos="0 0 0.6979" size="0.02 0.35 0.0493" contype="0" conaffinity="0" rgba="0.7 0.7 0.7 1"/>
+      <geom name="left_wall_seg2" type="box" pos="0 0 0.7964" size="0.02 0.35 0.0493" contype="0" conaffinity="0" rgba="0.7 0.7 0.7 1"/>
+      <geom name="left_wall_seg3" type="box" pos="0 0 0.8950" size="0.02 0.35 0.0493" contype="0" conaffinity="0" rgba="0.7 0.7 0.7 1"/>
+      <geom name="left_wall_seg4" type="box" pos="0 0 0.9936" size="0.02 0.35 0.0493" contype="0" conaffinity="0" rgba="0.7 0.7 0.7 1"/>
+      <geom name="left_wall_seg5" type="box" pos="0 0 1.0921" size="0.02 0.35 0.0493" contype="0" conaffinity="0" rgba="0.7 0.7 0.7 1"/>
+      <geom name="left_wall_seg6" type="box" pos="0 0 1.1907" size="0.02 0.35 0.0493" contype="0" conaffinity="0" rgba="0.7 0.7 0.7 1"/>
       <geom name="left_wall_leg_front" type="box" pos="0 -0.28 0.275" size="0.03 0.03 0.275"
             contype="0" conaffinity="0" rgba="0.25 0.25 0.25 1"/>
       <geom name="left_wall_leg_back" type="box" pos="0 0.28 0.275" size="0.03 0.03 0.275"
@@ -42,6 +56,13 @@
     </body>
     <body name="right_wall_frame" pos="0.5 0 0">
       <geom name="right_wall" type="box" pos="0 0 0.895" size="0.02 0.35 0.345" rgba="0.7 0.7 0.7 1"/>
+      <geom name="right_wall_seg0" type="box" pos="0 0 0.5993" size="0.02 0.35 0.0493" contype="0" conaffinity="0" rgba="0.7 0.7 0.7 1"/>
+      <geom name="right_wall_seg1" type="box" pos="0 0 0.6979" size="0.02 0.35 0.0493" contype="0" conaffinity="0" rgba="0.7 0.7 0.7 1"/>
+      <geom name="right_wall_seg2" type="box" pos="0 0 0.7964" size="0.02 0.35 0.0493" contype="0" conaffinity="0" rgba="0.7 0.7 0.7 1"/>
+      <geom name="right_wall_seg3" type="box" pos="0 0 0.8950" size="0.02 0.35 0.0493" contype="0" conaffinity="0" rgba="0.7 0.7 0.7 1"/>
+      <geom name="right_wall_seg4" type="box" pos="0 0 0.9936" size="0.02 0.35 0.0493" contype="0" conaffinity="0" rgba="0.7 0.7 0.7 1"/>
+      <geom name="right_wall_seg5" type="box" pos="0 0 1.0921" size="0.02 0.35 0.0493" contype="0" conaffinity="0" rgba="0.7 0.7 0.7 1"/>
+      <geom name="right_wall_seg6" type="box" pos="0 0 1.1907" size="0.02 0.35 0.0493" contype="0" conaffinity="0" rgba="0.7 0.7 0.7 1"/>
       <geom name="right_wall_leg_front" type="box" pos="0 -0.28 0.275" size="0.03 0.03 0.275"
             contype="0" conaffinity="0" rgba="0.25 0.25 0.25 1"/>
       <geom name="right_wall_leg_back" type="box" pos="0 0.28 0.275" size="0.03 0.03 0.275"
@@ -50,6 +71,6 @@
   </worldbody>
 
   <actuator>
-    <motor name="cart_force" joint="cart_slide" gear="1" ctrllimited="true" ctrlrange="-2 2"/>
+    <motor name="cart_force" joint="cart_slide" gear="1" ctrllimited="true" ctrlrange="-10 10"/>
   </actuator>
 </mujoco>

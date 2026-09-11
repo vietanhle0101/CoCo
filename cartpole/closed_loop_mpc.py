@@ -18,7 +18,12 @@ from scipy.linalg import solve_discrete_are
 ROOT = Path(__file__).resolve().parents[1]
 THETA_LIMIT = np.pi / 8
 WALL_DISTANCE = 0.5
-CART_FORCE_LIMIT = 2.0
+# The saved dataset config's +/-2N limit leaves almost no actuator margin for
+# a 1kg cart + 1kg pole against gravity -- empirically, recovery from even a
+# ~0.15 rad disturbance was already on the edge of infeasible. 10N (about
+# half the combined weight force, mg~19.6N) gives real recovery headroom, more
+# in line with what a small cart-pole rig's motor would actually provide.
+CART_FORCE_LIMIT = 10.0
 # The default Matplotlib config directory may be read-only in a virtualenv or
 # remote workspace.  Configure it before importing pyplot.
 os.environ.setdefault("MPLCONFIGDIR", str(ROOT / ".matplotlib"))

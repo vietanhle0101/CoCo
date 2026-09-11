@@ -1,0 +1,47 @@
+<mujoco model="planar_pushing_mpc_plant">
+  <compiler angle="radian" autolimits="true"/>
+  <option gravity="0 0 -9.81" timestep="0.002" integrator="implicitfast"/>
+  <default>
+    <geom friction="0.8 0.02 0.001" condim="3"/>
+    <joint damping="0.05"/>
+  </default>
+  <worldbody>
+    <geom name="table" type="plane" size="2 2 0.1" rgba="0.18 0.20 0.22 1"/>
+    <light pos="0 0 2" directional="true"/>
+    <camera name="overview" pos="0 -1.5 1.3" xyaxes="1 0 0 0 0.65 0.75"/>
+
+    <!-- The three joints restrict the block to planar motion.  Their damping
+         represents table drag that is not captured by a purely planar model. -->
+    <body name="block" pos="0 0 0.08">
+      <joint name="block_x" type="slide" axis="1 0 0" damping="0.8"/>
+      <joint name="block_y" type="slide" axis="0 1 0" damping="0.8"/>
+      <joint name="block_yaw" type="hinge" axis="0 0 1" damping="0.04"/>
+      <geom name="block_geom" type="box" size="0.15 0.15 0.08" mass="1"
+            rgba="0.15 0.45 0.9 1"/>
+    </body>
+
+    <!-- Two physical, servo-driven pushers contact opposing box faces. -->
+    <body name="left_pusher" pos="0 0 0.08">
+      <joint name="left_pusher_x" type="slide" axis="1 0 0" damping="0.2"/>
+      <joint name="left_pusher_y" type="slide" axis="0 1 0" damping="0.2"/>
+      <geom name="left_pusher_geom" type="sphere" size="0.03" mass="0.20"
+            friction="0.9 0.02 0.001" rgba="0.95 0.35 0.1 1"/>
+    </body>
+    <body name="right_pusher" pos="0 0 0.08">
+      <joint name="right_pusher_x" type="slide" axis="1 0 0" damping="0.2"/>
+      <joint name="right_pusher_y" type="slide" axis="0 1 0" damping="0.2"/>
+      <geom name="right_pusher_geom" type="sphere" size="0.03" mass="0.20"
+            friction="0.9 0.02 0.001" rgba="0.95 0.35 0.1 1"/>
+    </body>
+  </worldbody>
+  <actuator>
+    <position name="left_pusher_x_servo" joint="left_pusher_x" kp="150" kv="20"
+              forcelimited="true" forcerange="-30 30" ctrllimited="true" ctrlrange="-0.8 0.8"/>
+    <position name="left_pusher_y_servo" joint="left_pusher_y" kp="150" kv="20"
+              forcelimited="true" forcerange="-30 30" ctrllimited="true" ctrlrange="-0.8 0.8"/>
+    <position name="right_pusher_x_servo" joint="right_pusher_x" kp="150" kv="20"
+              forcelimited="true" forcerange="-30 30" ctrllimited="true" ctrlrange="-0.8 0.8"/>
+    <position name="right_pusher_y_servo" joint="right_pusher_y" kp="150" kv="20"
+              forcelimited="true" forcerange="-30 30" ctrllimited="true" ctrlrange="-0.8 0.8"/>
+  </actuator>
+</mujoco>
